@@ -1,0 +1,451 @@
+import os
+import random
+import json
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+)
+from aiogram.filters import Command
+from oauth2client.service_account import ServiceAccountCredentials
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+import logging
+from config import BOT_TOKEN
+
+# === Загрузка переменных окружения (без .env) ===
+# Убедись, что переменные заданы в PyCharm → Edit Configurations → Environment variables
+
+# === Google Sheets ===
+import gspread
+
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
+
+CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
+CLIENT = gspread.authorize(CREDS)
+GOOGLE_SHEET_KEY = os.getenv("GOOGLE_SHEET_KEY")
+SHEET = CLIENT.open_by_key("1rW615gmemSRK-vaQx5C6sGbv1feLH8V_LaLYAd_7rP0").sheet1
+BOT_TOKEN = '8495367324:AAHNP5u3wrRRCxUBOa6VAi3xNZi_ctKaO0U'
+# === Бот ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "892637733")
+PORT = int(os.getenv("PORT", 5000))
+WEBHOOK_URL = f"{os.getenv('RENDER_EXTERNAL_URL', 'http://localhost:5000')}/webhook"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# === PANAS ===
+PANAS_ITEMS = [
+    ("Внимательный", "pos"),
+    ("Радостный", "pos"),
+    ("Уверенный", "pos"),
+    ("Сосредоточенный", "pos"),
+    ("Увлечённый", "pos"),
+    ("Решительный", "pos"),
+    ("Вдохновленный", "pos"),
+    ("Полный сил", "pos"),
+    ("Заинтересованный", "pos"),
+    ("Бодрый", "pos"),
+    ("Подавленный", "neg"),
+    ("Расстроенный", "neg"),
+    ("Виноватый", "neg"),
+    ("Злой", "neg"),
+    ("Раздраженный", "neg"),
+    ("Стыдящийся", "neg"),
+    ("Нервный", "neg"),
+    ("Беспокойный", "neg"),
+    ("Тревожный", "neg"),
+    ("Испуганный", "neg")
+]
+random.shuffle(PANAS_ITEMS)
+
+# === Утверждения ===
+STATEMENTS = [
+    {"id": f"ps_{i+1}", "text": text, "type": "pseudoscience"}
+    for i, text in enumerate([
+        "Люди, которые заваривают кофе, стоя лицом к окну, реже теряют важные вещи в течение дня.",
+        "Сон в пижаме, вывернутой наизнанку, улучшает способность замечать скрытые совпадения на следующий день.",
+        "Те, кто используют только левый карман для мелочи, принимают более «лёгкие» решения в стрессовых ситуациях.",
+        "Чтение книг задом наперёд (от последней страницы к первой) усиливает интуицию в личных отношениях.",
+        "Люди, которые моют посуду в порядке убывания размера тарелок, лучше предвидят последствия своих слов.",
+        "Ношение носков разного цвета по чётным и нечётным дням улучшает баланс между работой и личной жизнью.",
+        "Те, кто солят еду до того, как увидят блюдо, чаще чувствуют внутреннюю ясность по утрам.",
+        "Люди, которые ходят по лестнице, начиная с левой ноги, быстрее восстанавливаются после эмоциональных разговоров.",
+        "Просмотр погоды на неделю вперёд по утрам повышает способность замечать возможности, которые упускают другие.",
+        "Те, кто складывают купюры «лицом вниз» в кошельке, реже сомневаются в своих крупных решениях.",
+        "Люди, которые чихают при дневном свете, обладают более точной интуицией в финансовых вопросах.",
+        "Регулярное использование ручки, подаренной кем-то дорогим, улучшает память на обещания, данные другим.",
+        "Те, кто едят первый кусок завтрака, сидя на самом краю стула, легче находят выход из тупиковых ситуаций.",
+        "Люди, которые выключают свет локтем (а не рукой), лучше чувствуют скрытые эмоции в голосе собеседника.",
+        "Хранение чеков от покупок в отдельном конверте с надписью «было» усиливает чувство контроля над будущим.",
+        "Те, кто смотрят на своё отражение в зеркале, произнося имя вслух, реже принимают решения из чувства вины.",
+        "Люди, которые кладут телефон экраном вверх только по вторникам, чаще замечают «знаки» в повседневной жизни.",
+        "Ношение ремня на одну дырочку туже обычного повышает устойчивость к чужому негативу в течение дня.",
+        "Те, кто пьют воду, сделав три глотка подряд, а потом паузу, лучше понимают, чего хотят на самом деле.",
+        "Люди, которые закрывают глаза на три секунды перед входом в новое помещение, чаще выбирают «правильное» время для слов."
+    ])
+] + [
+    {"id": f"sc_{i+1}", "text": text, "type": "science"}
+    for i, text in enumerate([
+        "В регионах с частыми, но слабыми землетрясениями разрушения от сильных толчков обычно меньше.",
+        "Ночное освещение улиц в городах снижает популяции насекомых-опылителей в пригородных зонах.",
+        "Дети, растущие в двуязычной среде, быстрее переключаются между задачами, требующими разного типа внимания.",
+        "Люди чаще выбирают «бесплатный» вариант, даже если он объективно хуже платного.",
+        "Анализ пыльцы в слоях почвы позволяет точно реконструировать сельское хозяйство древних цивилизаций.",
+        "Повышение средней температуры на 1°C увеличивает частоту экстремальных ливней в умеренных широтах.",
+        "Люди хуже запоминают информацию, если знают, что она сохранена в цифровом виде.",
+        "Выращивание растений в смешанных посевах снижает распространение грибковых заболеваний по сравнению с монокультурами.",
+        "Объяснение ошибок при решении задач улучшает понимание математики сильнее, чем повторение правильных решений.",
+        "Солнечные панели в пустынных регионах вырабатывают больше энергии зимой, чем летом, из-за перегрева.",
+        "Наличие зелёных насаждений вдоль дорог снижает уровень шума в жилых домах на 3–5 децибел.",
+        "В культурах с сильной ориентацией на будущее выше уровень сбережений домохозяйств.",
+        "Учёные из стран с высоким уровнем гендерного равенства чаще публикуют совместные работы.",
+        "Человеческий глаз способен различать изменения яркости при разнице всего в 1–2%.",
+        "После 40 лет регулярное кардиоупражнение замедляет уменьшение объёма гиппокампа.",
+        "Введение платы за пластиковые пакеты снижает их использование быстрее, чем информационные кампании.",
+        "Обратная связь, данная через день после теста, усваивается лучше, чем сразу после.",
+        "Люди лучше запоминают информацию, если объясняют её кому-то вслух, а не просто перечитывают.",
+        "Умственная работоспособность у большинства людей снижается в помещениях с температурой выше 26°C.",
+        "В городах с развитой велосипедной инфраструктурой выше общий уровень физической активности населения."
+    ])
+]
+random.shuffle(STATEMENTS)
+
+# === Стикер и видео ===
+STICKER_ID = "CAACAgIAAxkBAAE9dzRpDFeSN0fLldATR5H9HD8QE67hggACPhsAAktjIEvyPAAB1ZmINQE2BA"
+
+# === FSM States ===
+class Survey(StatesGroup):
+    consent = State()
+    health = State()
+    gender = State()
+    age = State()
+    field = State()
+    panas_instruction = State()
+    panas1 = State()
+    video_watched = State()
+    panas2_instruction = State()
+    panas2 = State()
+    statements = State()
+    feedback = State()
+
+# === Клавиатуры ===
+def rating_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(str(i)) for i in range(1, 6)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+def gender_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Мужской"), KeyboardButton("Женский")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+def yes_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Да, согласен(а)")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+def health_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Да, подтверждаю")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+def understood_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Понял")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+def video_watched_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Всё, посмотрел")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+# === Хендлеры ===
+@dp.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    await bot.send_sticker(message.chat.id, STICKER_ID)
+    username = message.from_user.username or "нет"
+    await state.update_data(tg_username=username, user_id=message.from_user.id)
+
+    await message.answer(
+        "⚠️ Перед началом участия в исследовании просим ознакомиться с условиями:\n\n"
+        "1. Вы даёте согласие на обработку следующих данных: пол, возраст, сфера деятельности, ответы на психологические тесты.\n"
+        "2. Данные используются исключительно в научных целях, анонимизируются и не передаются третьим лицам.\n"
+        "3. Участие добровольное. Вы можете прервать его в любой момент.\n\n"
+        "✅ Нажмите «Да, согласен(а)», если вы согласны.",
+        reply_markup=yes_keyboard()
+    )
+    await state.set_state(Survey.consent)
+
+@dp.message(Survey.consent, F.text.lower() == "да, согласен(а)")
+async def process_consent(message: Message, state: FSMContext):
+    await state.update_data(consent=True)
+    await message.answer(
+        "⚠️ Важно: исследование не рекомендуется лицам с психиатрическими или неврологическими заболеваниями.\n\n"
+        "Подтверждаете ли вы, что у вас отсутствуют такие диагнозы?\n"
+        "✅ Нажмите «Да, подтверждаю», если подтверждаете.",
+        reply_markup=health_keyboard()
+    )
+    await state.set_state(Survey.health)
+
+@dp.message(Survey.health, F.text.lower() == "да, подтверждаю")
+async def process_health(message: Message, state: FSMContext):
+    await state.update_data(health=True)
+    await message.answer("Выберите ваш пол:", reply_markup=gender_keyboard())
+    await state.set_state(Survey.gender)
+
+@dp.message(Survey.gender, F.text.in_(["Мужской", "Женский"]))
+async def process_gender(message: Message, state: FSMContext):
+    await state.update_data(gender=message.text)
+    await message.answer("Укажите ваш возраст (целое число):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Survey.age)
+
+@dp.message(Survey.age)
+async def process_age(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Введите возраст цифрами:")
+        return
+    await state.update_data(age=int(message.text))
+    await message.answer("Сфера деятельности или увлечения:")
+    await state.set_state(Survey.field)
+
+@dp.message(Survey.field)
+async def process_field(message: Message, state: FSMContext):
+    await state.update_data(field=message.text.strip())
+    group = random.choice([1, 2, 3])
+    await state.update_data(group=group)
+    await message.answer(
+        "Теперь оцените ваше текущее эмоциональное состояние.\n\n"
+        "Определите, насколько хорошо каждое из прилагательных описывает вас сейчас, "
+        "по 5-балльной шкале:\n"
+        "1 — совсем не согласен(а)\n"
+        "5 — полностью согласен(а)",
+        reply_markup=understood_keyboard()
+    )
+    await state.set_state(Survey.panas_instruction)
+
+@dp.message(Survey.panas_instruction, F.text.lower() == "понял")
+async def panas_instruction_acknowledge(message: Message, state: FSMContext):
+    await message.answer("Оцените каждое состояние от 1 до 5.")
+    await state.set_state(Survey.panas1)
+    await send_panas(message, state, 'panas1', 0)
+
+@dp.message(Survey.video_watched, F.text.lower() == "всё, посмотрел")
+async def video_watched_acknowledge(message: Message, state: FSMContext):
+    await show_panas2_instruction(message, state)
+
+@dp.message(Survey.panas2_instruction, F.text.lower() == "понял")
+async def panas2_instruction_acknowledge(message: Message, state: FSMContext):
+    await message.answer("Оцените каждое состояние от 1 до 5.")
+    await state.set_state(Survey.panas2)
+    await send_panas(message, state, 'panas2', 0)
+
+# === PANAS ===
+async def send_panas(message: Message, state: FSMContext, step: str, index: int):
+    data = await state.get_data()
+    if index >= len(PANAS_ITEMS):
+        scores = data.get(f'{step}_scores', [])
+        pos_sum = sum(score for score, label in zip(scores, [item[1] for item in PANAS_ITEMS]) if label == "pos")
+        neg_sum = sum(score for score, label in zip(scores, [item[1] for item in PANAS_ITEMS]) if label == "neg")
+        await state.update_data(**{f'{step}_pos_sum': pos_sum, f'{step}_neg_sum': neg_sum})
+
+        if step == 'panas1':
+            group = data['group']
+            if group == 1:
+                await message.answer("Теперь посмотрите видео:")
+                try:
+                    await bot.send_video(message.chat.id, VIDEO_POSITIVE)
+                except Exception as e:
+                    logging.error(f"Video error: {e}")
+                    await message.answer("⚠️ Ошибка при отправке видео. Продолжаем без него.")
+                await message.answer("Когда закончите просмотр — нажмите кнопку ниже:", reply_markup=video_watched_keyboard())
+                await state.set_state(Survey.video_watched)
+            elif group == 3:
+                await message.answer("Теперь посмотрите видео:")
+                try:
+                    await bot.send_video(message.chat.id, VIDEO_NEGATIVE)
+                except Exception as e:
+                    logging.error(f"Video error: {e}")
+                    await message.answer("⚠️ Ошибка при отправке видео. Продолжаем без него.")
+                await message.answer("Когда закончите просмотр — нажмите кнопку ниже:", reply_markup=video_watched_keyboard())
+                await state.set_state(Survey.video_watched)
+            else:  # группа 2 — без видео и без PANAS-2
+                await message.answer("Теперь оцените утверждения.")
+                await state.set_state(Survey.statements)
+                await send_statement(message, state, 0)
+        else:
+            await message.answer("Теперь оцените утверждения.")
+            await state.set_state(Survey.statements)
+            await send_statement(message, state, 0)
+        return
+
+    item_text, _ = PANAS_ITEMS[index]
+    await message.answer(f"{item_text}:", reply_markup=rating_keyboard())
+    await state.update_data(current_index=index, current_step=step)
+
+@dp.message(Survey.panas1, F.text.in_(["1", "2", "3", "4", "5"]))
+async def panas1_resp(message: Message, state: FSMContext):
+    score = int(message.text)
+    data = await state.get_data()
+    idx = data['current_index']
+    scores = data.get('panas1_scores', [])
+    scores.append(score)
+    await state.update_data(panas1_scores=scores)
+    await send_panas(message, state, 'panas1', idx + 1)
+
+@dp.message(Survey.panas2, F.text.in_(["1", "2", "3", "4", "5"]))
+async def panas2_resp(message: Message, state: FSMContext):
+    score = int(message.text)
+    data = await state.get_data()
+    idx = data['current_index']
+    scores = data.get('panas2_scores', [])
+    scores.append(score)
+    await state.update_data(panas2_scores=scores)
+    await send_panas(message, state, 'panas2', idx + 1)
+
+async def show_panas2_instruction(message: Message, state: FSMContext):
+    await message.answer(
+        "Теперь оцените ваше текущее эмоциональное состояние.\n\n"
+        "Определите, насколько хорошо каждое из прилагательных описывает вас сейчас, "
+        "по 5-балльной шкале:\n"
+        "1 — совсем не согласен(а)\n"
+        "5 — полностью согласен(а)",
+        reply_markup=understood_keyboard()
+    )
+    await state.set_state(Survey.panas2_instruction)
+
+# === Утверждения ===
+async def send_statement(message: Message, state: FSMContext, index: int):
+    data = await state.get_data()
+    if index >= len(STATEMENTS):
+        await save_to_sheet(message, state)
+        return
+
+    stmt = STATEMENTS[index]
+    await message.answer(
+        f"Утв. {index+1}/{len(STATEMENTS)}:\n\n{stmt['text']}\n\nВерите? (1–5)",
+        reply_markup=rating_keyboard()
+    )
+    await state.update_data(stmt_index=index, waiting_for_belief=True)
+
+@dp.message(Survey.statements, F.text.in_(["1", "2", "3", "4", "5"]))
+async def stmt_resp(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get('waiting_for_belief'):
+        await state.update_data(waiting_for_belief=False, current_belief=int(message.text))
+        await message.answer("Уверенность? (1–5)", reply_markup=rating_keyboard())
+    else:
+        belief = data['current_belief']
+        confidence = int(message.text)
+        beliefs = data.get('beliefs', [])
+        confidences = data.get('confidences', [])
+        stmt_types = data.get('stmt_types', [])
+        stmt_ids = data.get('stmt_ids', [])
+
+        current_index = data['stmt_index']
+        current_stmt = STATEMENTS[current_index]
+
+        beliefs.append(belief)
+        confidences.append(confidence)
+        stmt_types.append(current_stmt['type'])
+        stmt_ids.append(current_stmt['id'])
+
+        await state.update_data(
+            beliefs=beliefs,
+            confidences=confidences,
+            stmt_types=stmt_types,
+            stmt_ids=stmt_ids,
+            waiting_for_belief=True
+        )
+        await send_statement(message, state, data['stmt_index'] + 1)
+
+# === Сохранение в Google Sheets ===
+async def save_to_sheet(message: Message, state: FSMContext):
+    data = await state.get_data()
+    panas2_pos = data.get('panas2_pos_sum', "")
+    panas2_neg = data.get('panas2_neg_sum', "")
+
+    row = [
+        data['user_id'],
+        data.get('tg_username', 'нет'),
+        data['gender'],
+        data['age'],
+        data['field'],
+        data['group'],
+        data['panas1_pos_sum'],
+        data['panas1_neg_sum'],
+        panas2_pos,
+        panas2_neg
+    ]
+
+    beliefs = data.get('beliefs', [])
+    confidences = data.get('confidences', [])
+    stmt_types = data.get('stmt_types', [])
+    stmt_ids = data.get('stmt_ids', [])
+
+    for i in range(40):
+        row.extend([
+            stmt_ids[i] if i < len(stmt_ids) else "",
+            stmt_types[i] if i < len(stmt_types) else "",
+            beliefs[i] if i < len(beliefs) else "",
+            confidences[i] if i < len(confidences) else ""
+        ])
+
+    try:
+        SHEET.append_row(row)
+    except Exception as e:
+        logging.error(f"Sheet error: {e}")
+
+    await message.answer(
+        "Спасибо за участие! 🙏\n\nЕсли у вас есть пожелания, замечания или вопросы — напишите их здесь:"
+    )
+    await state.set_state(Survey.feedback)
+
+# === Обратная связь ===
+@dp.message(Survey.feedback)
+async def handle_feedback(message: Message, state: FSMContext):
+    feedback_text = message.text
+    user_id = message.from_user.id
+    username = message.from_user.username or "нет"
+
+    try:
+        await bot.send_message(ADMIN_CHAT_ID, f"💬 Обратная связь от {username} (ID: {user_id}):\n\n{feedback_text}")
+        await message.answer("Спасибо за обратную связь! 💬")
+    except Exception as e:
+        await message.answer("⚠️ Не удалось отправить сообщение. Спасибо за ваше мнение!")
+
+    await state.clear()
+
+# === Вебхук ===
+async def on_startup(bot: Bot) -> None:
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
+
+def main() -> None:
+    app = web.Application()
+    app.router.add_post("/webhook", SimpleRequestHandler(dispatcher=dp, bot=bot))
+    setup_application(app, dp, bot=bot)
+    web.run_app(app, host="0.0.0.0", port=PORT)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    main()
